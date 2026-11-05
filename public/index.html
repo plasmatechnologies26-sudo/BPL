@@ -34,8 +34,12 @@
     </div>
   </div>
   <div id="app" class="app-shell hidden">
-    <aside class="sidebar">
-      <a class="brand" href="#"><span class="brand-mark">R<span>•</span></span><span>BPL<small>BADMINTON</small></span></a>
+    <div id="sidebarOverlay" class="sidebar-overlay hidden"></div>
+    <aside class="sidebar" id="sidebar">
+      <div class="sidebar-header-mobile">
+        <a class="brand" href="#"><span class="brand-mark">R<span>•</span></span><span>BPL<small>BADMINTON</small></span></a>
+        <button type="button" class="sidebar-close-btn" id="sidebarCloseBtn">✕</button>
+      </div>
       <div class="side-label">WORKSPACE</div>
       <nav id="nav">
         <button class="nav-item active" data-view="dashboard"><span>◫</span> Overview</button>
@@ -47,19 +51,22 @@
         <button class="nav-item" data-view="history"><span>◷</span> History</button>
       </nav>
       <div class="sidebar-bottom">
-        <button type="button" class="btn ghost small full" id="sidebarServerBtn" style="margin-bottom:10px;font-size:10px">⚙️ Server Settings</button>
+        <button type="button" class="btn ghost small full" id="sidebarServerBtn" style="margin-bottom:10px;font-size:11px">⚙️ Server Settings</button>
         <div class="role-card"><span class="online-dot"></span><div><b id="roleName">Organizer</b><small>Access enabled</small></div></div>
         <button id="logoutBtn" class="logout-btn">↪ Sign out</button>
       </div>
     </aside>
     <main class="main-content">
       <header class="topbar">
-        <div>
-          <div class="breadcrumb">BPL <span>/</span> <b id="pageCrumb">OVERVIEW</b></div>
-          <h2 id="pageTitle">Tournament overview</h2>
+        <div class="topbar-left">
+          <button type="button" class="mobile-menu-btn" id="mobileMenuBtn" aria-label="Open menu">☰</button>
+          <div>
+            <div class="breadcrumb">BPL <span>/</span> <b id="pageCrumb">OVERVIEW</b></div>
+            <h2 id="pageTitle">Tournament overview</h2>
+          </div>
         </div>
         <div class="top-actions">
-          <a class="btn ghost" id="spectatorLink" href="/?view=public" target="_blank">↗ Spectator view</a>
+          <a class="btn ghost small" id="spectatorLink" href="/?view=public" target="_blank">↗ Live</a>
           <span class="avatar-mini" id="userAvatar">O</span>
         </div>
       </header>

@@ -150,8 +150,18 @@ function canAdmin() {
   return session?.role === 'admin';
 }
 
+function toggleMobileSidebar(open) {
+  const sidebar = $('#sidebar');
+  const overlay = $('#sidebarOverlay');
+  if (!sidebar) return;
+  const shouldOpen = open !== undefined ? open : !sidebar.classList.contains('open');
+  sidebar.classList.toggle('open', shouldOpen);
+  if (overlay) overlay.classList.toggle('hidden', !shouldOpen);
+}
+
 function setView(view) {
   currentView = view;
+  toggleMobileSidebar(false);
   $$('.nav-item').forEach(b => b.classList.toggle('active', b.dataset.view === view));
   $$('.view').forEach(v => v.classList.toggle('active', v.id === `view-${view}`));
   const titles = {
@@ -702,6 +712,9 @@ $('#logoutBtn').onclick = () => {
 
 $('#serverSettingsBtn')?.addEventListener('click', serverConfigModal);
 $('#sidebarServerBtn')?.addEventListener('click', serverConfigModal);
+$('#mobileMenuBtn')?.addEventListener('click', () => toggleMobileSidebar(true));
+$('#sidebarCloseBtn')?.addEventListener('click', () => toggleMobileSidebar(false));
+$('#sidebarOverlay')?.addEventListener('click', () => toggleMobileSidebar(false));
 
 document.addEventListener('click', async e => {
   const goto = e.target.closest('[data-goto]');
