@@ -1,0 +1,9 @@
+{
+  "appId": "com.bpl.badminton",
+  "appName": "BPL Badminton",
+  "webDir": "public",
+  "server": {
+    "androidScheme": "https",
+    "cleartext": true
+  }
+}

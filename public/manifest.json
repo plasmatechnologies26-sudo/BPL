@@ -1,0 +1,16 @@
+{
+  "name": "BPL Badminton Tournament Manager",
+  "short_name": "BPL Rally",
+  "start_url": "/",
+  "display": "standalone",
+  "background_color": "#101a33",
+  "theme_color": "#101a33",
+  "icons": [
+    {
+      "src": "/icon.svg",
+      "sizes": "any",
+      "type": "image/svg+xml",
+      "purpose": "any maskable"
+    }
+  ]
+}

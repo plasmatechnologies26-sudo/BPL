@@ -1,0 +1,86 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no, viewport-fit=cover">
+  <meta name="theme-color" content="#101a33">
+  <meta name="apple-mobile-web-app-capable" content="yes">
+  <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+  <meta name="apple-mobile-web-app-title" content="BPL Badminton">
+  <title>BPL — Badminton Tournament Manager</title>
+  <link rel="manifest" href="manifest.json">
+  <link rel="icon" type="image/svg+xml" href="icon.svg">
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=DM+Sans:wght@400;500;600;700;800&family=Space+Grotesk:wght@500;600;700&display=swap" rel="stylesheet">
+  <link rel="stylesheet" href="styles.css">
+</head>
+<body>
+  <div id="loginScreen" class="login-screen">
+    <div class="login-card">
+      <div class="brand-mark large">R<span>•</span></div>
+      <p class="eyebrow">BADMINTON PREMIER LEAGUE</p>
+      <h1>Play. Compete.<br><em>Own the court.</em></h1>
+      <p class="muted">Sign in as an organizer or scorer to manage tournaments and live matches.</p>
+      <form id="loginForm">
+        <label for="pinInput">Access PIN</label>
+        <input id="pinInput" type="password" inputmode="numeric" placeholder="Enter your PIN" required>
+        <button class="btn primary full" type="submit">Continue <span>→</span></button>
+      </form>
+      <p class="login-hint">Demo organizer PIN: <b>2468</b> · Scorer PIN: <b>1357</b></p>
+      <div style="margin-top:20px;text-align:center">
+        <button type="button" class="btn ghost small full" id="serverSettingsBtn">⚙️ Server: <span id="currentServerLabel">Auto</span></button>
+      </div>
+    </div>
+  </div>
+  <div id="app" class="app-shell hidden">
+    <aside class="sidebar">
+      <a class="brand" href="#"><span class="brand-mark">R<span>•</span></span><span>BPL<small>BADMINTON</small></span></a>
+      <div class="side-label">WORKSPACE</div>
+      <nav id="nav">
+        <button class="nav-item active" data-view="dashboard"><span>◫</span> Overview</button>
+        <button class="nav-item" data-view="players"><span>♙</span> Players</button>
+        <button class="nav-item" data-view="tournament"><span>⌘</span> Tournament</button>
+        <button class="nav-item" data-view="matches"><span>▤</span> Matches & scoring</button>
+        <button class="nav-item" data-view="leaderboard"><span>♜</span> Leaderboard</button>
+        <button class="nav-item" data-view="awards"><span>✦</span> Awards</button>
+        <button class="nav-item" data-view="history"><span>◷</span> History</button>
+      </nav>
+      <div class="sidebar-bottom">
+        <button type="button" class="btn ghost small full" id="sidebarServerBtn" style="margin-bottom:10px;font-size:10px">⚙️ Server Settings</button>
+        <div class="role-card"><span class="online-dot"></span><div><b id="roleName">Organizer</b><small>Access enabled</small></div></div>
+        <button id="logoutBtn" class="logout-btn">↪ Sign out</button>
+      </div>
+    </aside>
+    <main class="main-content">
+      <header class="topbar">
+        <div>
+          <div class="breadcrumb">BPL <span>/</span> <b id="pageCrumb">OVERVIEW</b></div>
+          <h2 id="pageTitle">Tournament overview</h2>
+        </div>
+        <div class="top-actions">
+          <a class="btn ghost" id="spectatorLink" href="/?view=public" target="_blank">↗ Spectator view</a>
+          <span class="avatar-mini" id="userAvatar">O</span>
+        </div>
+      </header>
+      <div id="notice" class="notice hidden"></div>
+      <section id="view-dashboard" class="view active"></section>
+      <section id="view-players" class="view"></section>
+      <section id="view-tournament" class="view"></section>
+      <section id="view-matches" class="view"></section>
+      <section id="view-leaderboard" class="view"></section>
+      <section id="view-awards" class="view"></section>
+      <section id="view-history" class="view"></section>
+    </main>
+  </div>
+  <div id="publicScreen" class="public-screen hidden">
+    <header class="public-header">
+      <a class="brand" href="/"><span class="brand-mark">R<span>•</span></span><span>BPL<small>LIVE SCOREBOARD</small></span></a>
+      <span class="live-indicator"><i></i> LIVE TOURNAMENT</span>
+    </header>
+    <main id="publicContent"></main>
+  </div>
+  <div id="modalRoot"></div>
+  <script src="app.js"></script>
+</body>
+</html>

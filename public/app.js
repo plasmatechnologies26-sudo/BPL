@@ -1,0 +1,763 @@
+const $ = s => document.querySelector(s);
+const $$ = s => [...document.querySelectorAll(s)];
+let db = { players: [], tournaments: [], activeTournamentId: null }, session = null, currentView = 'dashboard', ws = null;
+
+function getServerBase() {
+  const custom = localStorage.getItem('bpl_server_url');
+  if (custom) return custom.replace(/\/+$/, '');
+  if (location.protocol === 'http:' || location.protocol === 'https:') {
+    return location.origin;
+  }
+  return '';
+}
+
+function fullUrl(path) {
+  const base = getServerBase();
+  if (!base) return path;
+  return `${base}${path.startsWith('/') ? path : '/' + path}`;
+}
+
+function updateServerLabel() {
+  const s = getServerBase();
+  const label = $('#currentServerLabel');
+  if (label) {
+    if (!s || (typeof location !== 'undefined' && s === location.origin)) label.textContent = 'Auto (Host)';
+    else {
+      try { label.textContent = new URL(s).host; }
+      catch { label.textContent = s.slice(0, 18); }
+    }
+  }
+  const specLink = $('#spectatorLink');
+  if (specLink) {
+    specLink.href = s ? `${s}/?view=public` : '/?view=public';
+  }
+}
+
+function serverConfigModal() {
+  const curr = getServerBase();
+  modal(`
+    <div class="modal-head">
+      <h3>⚙️ Tournament Server Settings</h3>
+      <button class="modal-close" data-close>×</button>
+    </div>
+    <p class="muted" style="font-size:11px;margin-bottom:14px;line-height:1.5">
+      Connect this mobile app to your tournament backend.<br>
+      • Local Wi-Fi: <code>http://192.168.1.50:3000</code><br>
+      • Cloud server: <code>https://your-server.onrender.com</code>
+    </p>
+    <form id="serverConfigForm">
+      <div class="field full-span">
+        <label>SERVER URL</label>
+        <input name="serverUrl" id="serverUrlInput" value="${esc(curr)}" placeholder="http://192.168.1.50:3000" required>
+      </div>
+      <div id="testServerResult" style="font-size:11px;margin-top:8px;min-height:18px"></div>
+      <div class="modal-actions" style="margin-top:16px;flex-wrap:wrap">
+        <button type="button" class="btn ghost small" id="testServerBtn">Test connection</button>
+        <button type="button" class="btn ghost small" id="resetServerBtn">Reset default</button>
+        <button type="submit" class="btn primary small">Save & Connect</button>
+      </div>
+    </form>
+  `);
+  $('#testServerBtn').onclick = async () => {
+    const val = $('#serverUrlInput').value.trim().replace(/\/+$/, '');
+    const out = $('#testServerResult');
+    if (!val) { out.textContent = 'Please enter a URL'; out.style.color = '#e15c68'; return; }
+    out.textContent = 'Testing connection...';
+    out.style.color = '#5278ff';
+    try {
+      const res = await fetch(`${val}/api/health`, { method: 'GET' });
+      if (res.ok) {
+        out.textContent = '✓ Successfully connected to tournament server!';
+        out.style.color = '#17a879';
+      } else {
+        out.textContent = '⚠ Server reached but returned HTTP ' + res.status;
+        out.style.color = '#e15c68';
+      }
+    } catch (err) {
+      out.textContent = '✗ Connection failed: ' + err.message;
+      out.style.color = '#e15c68';
+    }
+  };
+  $('#resetServerBtn').onclick = () => {
+    localStorage.removeItem('bpl_server_url');
+    closeModal();
+    notify('Reset to default server.');
+    updateServerLabel();
+    if (ws) { ws.close(); }
+    connectWS();
+    refresh();
+  };
+  $('#serverConfigForm').onsubmit = async e => {
+    e.preventDefault();
+    const val = $('#serverUrlInput').value.trim().replace(/\/+$/, '');
+    if (!val) return;
+    localStorage.setItem('bpl_server_url', val);
+    closeModal();
+    notify('Server URL saved: ' + val);
+    updateServerLabel();
+    if (ws) { ws.close(); }
+    connectWS();
+    refresh();
+  };
+}
+
+const activeT = () => db.tournaments.find(t => t.id === db.activeTournamentId) || null;
+const player = id => db.players.find(p => p.id === id) || { name: 'Unknown player', photo: '' };
+const headers = () => session ? { 'Content-Type': 'application/json', 'x-user-role': session.role, 'x-user-pin': session.pin } : { 'Content-Type': 'application/json' };
+
+async function api(url, opts = {}) {
+  const target = fullUrl(url);
+  try {
+    const res = await fetch(target, { ...opts, headers: { ...headers(), ...(opts.headers || {}) } });
+    const data = await res.json().catch(() => ({}));
+    if (!res.ok) throw new Error(data.error || 'Request failed');
+    return data;
+  } catch (err) {
+    if (!getServerBase() && (!location.hostname || location.hostname === 'localhost' || location.protocol === 'capacitor:')) {
+      serverConfigModal();
+    }
+    throw err;
+  }
+}
+
+function notify(msg, error = false) {
+  const n = $('#notice');
+  if (!n) return;
+  n.textContent = msg;
+  n.classList.remove('hidden', 'error');
+  if (error) n.classList.add('error');
+  setTimeout(() => n.classList.add('hidden'), 3600);
+}
+
+function esc(s = '') {
+  return String(s).replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
+}
+
+function avatar(p, cls = 'player-avatar') {
+  return `<span class="${cls}">${p.photo ? `<img src="${p.photo}" alt="">` : esc((p.name || '?').split(' ').map(x => x[0]).join('').slice(0, 2).toUpperCase())}</span>`;
+}
+
+function teamName(team) {
+  return team.players.map(id => player(id).name).join(' + ');
+}
+
+function matchScore(m) {
+  const g = m.games[m.currentGame] || m.games[m.games.length - 1] || { a: 0, b: 0 };
+  return g;
+}
+
+function canAdmin() {
+  return session?.role === 'admin';
+}
+
+function setView(view) {
+  currentView = view;
+  $$('.nav-item').forEach(b => b.classList.toggle('active', b.dataset.view === view));
+  $$('.view').forEach(v => v.classList.toggle('active', v.id === `view-${view}`));
+  const titles = {
+    dashboard: ['OVERVIEW', 'Tournament overview'],
+    players: ['PLAYERS', 'Player directory'],
+    tournament: ['TOURNAMENT', 'Tournament setup'],
+    matches: ['MATCH CENTRE', 'Matches & scoring'],
+    leaderboard: ['STATISTICS', 'Leaderboard'],
+    awards: ['RECOGNITION', 'Awards & MVP'],
+    history: ['ARCHIVE', 'Tournament history']
+  };
+  if ($('#pageCrumb') && titles[view]) $('#pageCrumb').textContent = titles[view][0];
+  if ($('#pageTitle') && titles[view]) $('#pageTitle').textContent = titles[view][1];
+  render();
+}
+
+function render() {
+  if ($('#publicScreen') && !$('#publicScreen').classList.contains('hidden')) return;
+  ({
+    dashboard: renderDashboard,
+    players: renderPlayers,
+    tournament: renderTournament,
+    matches: renderMatches,
+    leaderboard: renderLeaderboard,
+    awards: renderAwards,
+    history: renderHistory
+  }[currentView] || renderDashboard)();
+}
+
+function matchCard(m) {
+  const g = matchScore(m), status = m.status === 'completed' ? 'Completed' : m.status === 'live' ? 'Live' : 'Upcoming';
+  return `<article class="match-card">
+    <div class="match-top"><small>${esc(m.code)} · ROUND ${m.round}</small><span class="pill ${m.status === 'live' ? 'green' : m.status === 'completed' ? 'blue' : ''}">${status}</span></div>
+    <div class="match-teams">
+      <div class="team-side"><b>${esc(teamName(m.teamA))}</b><small>TEAM A</small></div>
+      <span class="versus">VS</span>
+      <div class="team-side"><b>${esc(teamName(m.teamB))}</b><small>TEAM B</small></div>
+    </div>
+    <div class="score-row"><span class="score-number">${g.a}</span><span class="score-sep">:</span><span class="score-number">${g.b}</span></div>
+    ${m.status !== 'completed' ? `<div class="score-controls">
+      <button class="score-btn" data-score="${m.id}" data-side="a" data-delta="-1" ${!session ? 'disabled' : ''}>−</button>
+      <button class="score-btn plus" data-score="${m.id}" data-side="a" data-delta="1" ${!session ? 'disabled' : ''}>+ A</button>
+      <button class="score-btn plus" data-score="${m.id}" data-side="b" data-delta="1" ${!session ? 'disabled' : ''}>+ B</button>
+      <button class="score-btn" data-score="${m.id}" data-side="b" data-delta="-1" ${!session ? 'disabled' : ''}>−</button>
+    </div>` : `<div class="match-foot"><span>Winner: <b>${esc(teamName(m.winner === m.teamA.id ? m.teamA : m.teamB))}</b></span><span>${m.games.filter(g => g.completed).length} games</span></div>`}
+    <div class="match-foot"><span>Game ${(m.currentGame || 0) + 1} · Best of 3</span><span>${m.playerOfMatch ? `POTM: ${esc(player(m.playerOfMatch).name)}` : 'POTM pending'}</span></div>
+    ${canAdmin() && m.status === 'completed' ? `<div class="match-actions"><button class="btn ghost small" data-potm="${m.id}">✦ Set / edit POTM</button><button class="btn ghost small" data-reopen="${m.id}">Reopen</button></div>` : ''}
+    <div class="match-foot"><button data-undo="${m.id}" ${m.status === 'completed' ? 'disabled' : ''}>↶ Undo last point</button><span>${m.status === 'live' ? 'Score auto-saved' : ''}</span></div>
+  </article>`;
+}
+
+function renderDashboard() {
+  const t = activeT(), matches = t?.matches || [], played = matches.filter(m => m.status === 'completed').length, live = matches.filter(m => m.status === 'live').length;
+  $('#view-dashboard').innerHTML = `
+    <div class="hero-panel">
+      <div>
+        <div class="eyebrow">${t ? 'CURRENT TOURNAMENT' : 'READY FOR THE NEXT GAME'}</div>
+        <h3>${t ? esc(t.name) : 'Your court. Your competition.'}</h3>
+        <p>${t ? `${t.playerIds.length} players · ${t.pairingMode === 'fixed' ? 'Fixed teams' : 'Rotating partners'} · ${t.format === 'knockout' ? 'Knockout' : t.format === 'league' ? 'League' : 'Round robin'}` : 'Create a tournament, build teams and keep every match moving.'}</p>
+      </div>
+      <div class="hero-actions">
+        ${t ? `<button class="btn primary" data-goto="matches">Open match centre →</button>` : `<button class="btn primary" data-goto="tournament">＋ Create tournament</button>`}
+        <a class="btn ghost" href="${getServerBase() ? getServerBase() + '/?view=public' : '/?view=public'}" target="_blank">↗ Live screen</a>
+      </div>
+    </div>
+    <div class="grid stats-grid" style="margin-top:17px">
+      <div class="stat-card"><div class="stat-icon">♙</div><small>Registered players</small><strong>${db.players.length}</strong><div class="trend">Player directory</div></div>
+      <div class="stat-card"><div class="stat-icon">♜</div><small>Teams / pairings</small><strong>${t ? (t.pairingMode === 'fixed' ? t.teams.length : 'Dynamic') : 0}</strong><div class="trend">${t?.pairingMode === 'rotating' ? 'Partners rotate each round' : 'Current tournament'}</div></div>
+      <div class="stat-card"><div class="stat-icon">▤</div><small>Matches completed</small><strong>${played}<span style="color:#a5afbf;font-size:15px"> / ${matches.length}</span></strong><div class="trend">${live} live right now</div></div>
+      <div class="stat-card"><div class="stat-icon">🏆</div><small>Tournaments</small><strong>${db.tournaments.length}</strong><div class="trend">Saved tournament history</div></div>
+    </div>
+    <div class="section-head">
+      <div><h3>Match centre</h3><p>Quick access to your latest fixtures and live scores.</p></div>
+      <button class="btn ghost small" data-goto="matches">View all matches →</button>
+    </div>
+    ${matches.length ? `<div class="match-list">${matches.slice(0, 4).map(matchCard).join('')}</div>` : `<div class="panel empty"><div class="empty-icon">🏸</div><b>No tournament matches yet</b><p>Add players and create a tournament to generate fixtures automatically.</p><button class="btn primary" data-goto="tournament">Set up tournament</button></div>`}
+  `;
+}
+
+function renderPlayers() {
+  const root = $('#view-players');
+  root.innerHTML = `
+    <div class="section-head" style="margin-top:0">
+      <div><h3>Player directory <span class="pill blue">${db.players.length} players</span></h3><p>Build your player pool once, then select participants for any tournament.</p></div>
+      ${canAdmin() ? '<button class="btn primary" id="addPlayerBtn">＋ Add player</button>' : ''}
+    </div>
+    ${db.players.length ? `<div class="grid player-grid">${db.players.map(p => `
+      <article class="player-card">
+        <div class="player-card-top">${avatar(p)}${canAdmin() ? `<div class="card-actions"><button class="icon-btn" data-edit-player="${p.id}" title="Edit">✎</button><button class="icon-btn" data-delete-player="${p.id}" title="Delete">×</button></div>` : ''}</div>
+        <h4>${esc(p.name)}</h4><p>${esc(p.nickname || 'Tournament player')}</p>
+        <div class="player-meta"><div><b>${statsFor(p.id).played}</b><small>MATCHES</small></div><div><b>${statsFor(p.id).wins}</b><small>WINS</small></div><div><b>${statsFor(p.id).winRate}%</b><small>WIN RATE</small></div></div>
+      </article>`).join('')}</div>` : `
+      <div class="panel empty"><div class="empty-icon">♙</div><b>Your player list starts here</b><p>Add names and profile photos. The same players can be reused across tournaments.</p>${canAdmin() ? '<button class="btn primary" id="addPlayerEmpty">＋ Add first player</button>' : ''}</div>`}
+  `;
+  $('#addPlayerBtn')?.addEventListener('click', () => playerModal());
+  $('#addPlayerEmpty')?.addEventListener('click', () => playerModal());
+}
+
+function statsFor(pid) {
+  const t = activeT();
+  if (!t) return { played: 0, wins: 0, winRate: 0 };
+  const s = calcStats(t).find(x => x.playerId === pid);
+  return s || { played: 0, wins: 0, winRate: 0 };
+}
+
+function calcStats(t) {
+  const stats = {};
+  (t?.playerIds || []).forEach(pid => stats[pid] = { playerId: pid, played: 0, wins: 0, losses: 0, pointsFor: 0, pointsAgainst: 0, potm: 0 });
+  (t?.matches || []).filter(m => m.status === 'completed').forEach(m => {
+    [m.teamA, m.teamB].forEach((team, idx) => team.players.forEach(pid => {
+      if (!stats[pid]) return;
+      const s = stats[pid];
+      s.played++;
+      if (m.winner === team.id) s.wins++; else s.losses++;
+      m.games.forEach(g => { s.pointsFor += idx === 0 ? g.a : g.b; s.pointsAgainst += idx === 0 ? g.b : g.a; });
+    }));
+    if (m.playerOfMatch && stats[m.playerOfMatch]) stats[m.playerOfMatch].potm++;
+  });
+  return Object.values(stats).map(s => ({ ...s, winRate: s.played ? Math.round(s.wins / s.played * 100) : 0, pointDiff: s.pointsFor - s.pointsAgainst })).sort((a, b) => b.wins - a.wins || b.pointDiff - a.pointDiff || b.potm - a.potm);
+}
+
+function playerModal(existing = null) {
+  const p = existing || {};
+  modal(`
+    <div class="modal-head"><h3>${existing ? 'Edit player' : 'Add player'}</h3><button class="modal-close" data-close>×</button></div>
+    <form id="playerForm">
+      <div class="form-grid">
+        <div class="field full-span"><label>PLAYER NAME *</label><input name="name" required value="${esc(p.name || '')}" placeholder="e.g. Arun"></div>
+        <div class="field"><label>NICKNAME (OPTIONAL)</label><input name="nickname" value="${esc(p.nickname || '')}" placeholder="Display nickname"></div>
+        <div class="field"><label>PROFILE PHOTO</label><input name="photo" type="file" accept="image/*"></div>
+      </div>
+      <div class="modal-actions"><button type="button" class="btn ghost" data-close>Cancel</button><button class="btn primary">${existing ? 'Save changes' : 'Add player'}</button></div>
+    </form>
+  `);
+  $('#playerForm').onsubmit = async e => {
+    e.preventDefault();
+    try {
+      const f = e.target, file = f.photo.files[0];
+      let photo = p.photo || '';
+      if (file) photo = await fileToData(file);
+      const body = { name: f.name.value, nickname: f.nickname.value, photo };
+      if (existing) await api('/api/players/' + p.id, { method: 'PATCH', body: JSON.stringify(body) });
+      else await api('/api/players', { method: 'POST', body: JSON.stringify(body) });
+      closeModal();
+      notify(existing ? 'Player updated' : 'Player added');
+    } catch (err) {
+      notify(err.message, true);
+    }
+  };
+}
+
+function fileToData(file) {
+  return new Promise((resolve, reject) => {
+    if (file.size > 2 * 1024 * 1024) return reject(new Error('Please use a photo smaller than 2 MB.'));
+    const r = new FileReader();
+    r.onload = () => resolve(r.result);
+    r.onerror = reject;
+    r.readAsDataURL(file);
+  });
+}
+
+function renderTournament() {
+  const root = $('#view-tournament');
+  const t = activeT();
+  root.innerHTML = `
+    <div class="section-head" style="margin-top:0">
+      <div><h3>Create a tournament</h3><p>Choose the players and format. Teams and fixtures are generated for you.</p></div>
+      ${t ? '<span class="pill green">Active tournament exists</span>' : ''}
+    </div>
+    <form id="tournamentForm" class="panel">
+      <div class="form-grid">
+        <div class="field"><label>TOURNAMENT NAME *</label><input name="name" required placeholder="e.g. BPL Smash Cup"></div>
+        <div class="field"><label>DATE</label><input name="date" type="date" value="${new Date().toISOString().slice(0, 10)}"></div>
+        <div class="field full-span"><label>VENUE</label><input name="venue" placeholder="Court / sports centre"></div>
+        <div class="field full-span"><label>SELECT PARTICIPATING PLAYERS <span class="muted">(minimum 4 for doubles)</span></label>
+          ${db.players.length ? `<div class="check-list">${db.players.map(p => `<label class="check-player">${avatar(p, 'player-avatar')}<input type="checkbox" name="playerIds" value="${p.id}" checked> ${esc(p.name)}</label>`).join('')}</div>` : '<p class="muted">Add players in the Players section first.</p>'}
+        </div>
+        <div class="field full-span"><label>TEAM PAIRING MODE</label>
+          <div class="option-row">
+            <div class="option"><label><input type="radio" name="pairingMode" value="fixed" checked> Fixed teams</label><small>Partners stay together for the entire tournament.</small></div>
+            <div class="option"><label><input type="radio" name="pairingMode" value="rotating"> Rotating partners</label><small>New partner combinations each round. Individual standings.</small></div>
+          </div>
+        </div>
+        <div class="field full-span" id="teamSelectionField"><label>FIXED TEAM DRAW</label>
+          <div class="option-row">
+            <div class="option"><label><input type="radio" name="teamSelection" value="random" checked> Random draw</label></div>
+            <div class="option"><label><input type="radio" name="teamSelection" value="manual"> Registration order</label></div>
+          </div>
+        </div>
+        <div class="field full-span"><label>TOURNAMENT FORMAT</label>
+          <div class="option-row">
+            <div class="option"><label><input type="radio" name="format" value="roundrobin" checked> Round robin</label><small>Every team plays each other.</small></div>
+            <div class="option"><label><input type="radio" name="format" value="knockout"> Knockout</label><small>Lose and you're out.</small></div>
+            <div class="option"><label><input type="radio" name="format" value="league"> League</label><small>Standings decide the winner.</small></div>
+          </div>
+        </div>
+        <div class="field" id="roundsField"><label>ROTATING MODE – NUMBER OF ROUNDS</label><input name="rounds" type="number" min="1" max="8" value="${Math.max(1, Math.floor(db.players.length / 2))}"></div>
+      </div>
+      <div class="modal-actions"><button class="btn primary" type="submit" ${db.players.length < 4 ? 'disabled' : ''}>Generate teams & fixtures →</button></div>
+    </form>
+    ${t ? `<div class="section-head"><div><h3>Current tournament</h3><p>${esc(t.name)} · ${t.matches.length} fixtures generated</p></div><button class="btn ghost small" data-goto="matches">Go to scoring →</button></div>` : ''}
+  `;
+  const form = $('#tournamentForm');
+  form.querySelectorAll('[name=pairingMode]').forEach(x => x.addEventListener('change', () => {
+    const rotating = form.pairingMode.value === 'rotating';
+    $('#teamSelectionField').classList.toggle('hidden', rotating);
+    $('#roundsField').classList.toggle('hidden', !rotating);
+  }));
+  form.onsubmit = async e => {
+    e.preventDefault();
+    const fd = new FormData(form), ids = fd.getAll('playerIds');
+    if (ids.length < 4) return notify('Select at least 4 players.', true);
+    if (!confirm(`Generate tournament with ${ids.length} players? This will make it the active tournament.`)) return;
+    try {
+      await api('/api/tournaments', {
+        method: 'POST',
+        body: JSON.stringify({
+          name: fd.get('name'),
+          date: fd.get('date'),
+          venue: fd.get('venue'),
+          playerIds: ids,
+          pairingMode: fd.get('pairingMode'),
+          teamSelection: fd.get('teamSelection'),
+          format: fd.get('format'),
+          rounds: fd.get('rounds')
+        })
+      });
+      notify('Tournament and fixtures generated!');
+      setView('matches');
+    } catch (err) {
+      notify(err.message, true);
+    }
+  };
+}
+
+function renderMatches() {
+  const t = activeT(), root = $('#view-matches');
+  if (!t) {
+    root.innerHTML = '<div class="panel empty"><div class="empty-icon">▤</div><b>No active tournament</b><p>Create a tournament to generate match fixtures.</p><button class="btn primary" data-goto="tournament">Create tournament</button></div>';
+    return;
+  }
+  const rounds = [...new Set(t.matches.map(m => m.round))];
+  root.innerHTML = `
+    <div class="section-head" style="margin-top:0">
+      <div><h3>${esc(t.name)}</h3><p>${t.playerIds.length} players · ${t.matches.length} matches · ${t.pairingMode === 'fixed' ? 'Fixed teams' : 'Rotating partners'}</p></div>
+      <a class="btn ghost" href="${getServerBase() ? getServerBase() + '/?view=public' : '/?view=public'}" target="_blank">↗ Open public scoreboard</a>
+    </div>
+    <div class="grid stats-grid" style="margin-bottom:20px">
+      <div class="stat-card"><small>Total fixtures</small><strong>${t.matches.length}</strong></div>
+      <div class="stat-card"><small>Completed</small><strong>${t.matches.filter(m => m.status === 'completed').length}</strong></div>
+      <div class="stat-card"><small>Live now</small><strong>${t.matches.filter(m => m.status === 'live').length}</strong></div>
+      <div class="stat-card"><small>Remaining</small><strong>${t.matches.filter(m => m.status !== 'completed').length}</strong></div>
+    </div>
+    ${rounds.map(r => `<div class="round-title">ROUND ${r}</div><div class="match-list">${t.matches.filter(m => m.round === r).map(matchCard).join('')}</div>`).join('') || '<div class="panel empty">No fixtures generated.</div>'}
+    <div class="section-head"><div><h3>Scoring controls</h3><p>Tap +1 to award a point. Changes save automatically and sync to spectator screens.</p></div></div>
+    <div class="panel"><span class="pill green">● Live sync enabled</span> <span class="muted" style="font-size:11px;margin-left:8px">Best of 3 · 21 points · win by 2 · cap at 30</span></div>
+  `;
+}
+
+function renderLeaderboard() {
+  const t = activeT(), root = $('#view-leaderboard');
+  if (!t) {
+    root.innerHTML = '<div class="panel empty"><b>No statistics yet</b><p>Start a tournament and record match scores to build the leaderboard.</p></div>';
+    return;
+  }
+  const stats = calcStats(t);
+  root.innerHTML = `
+    <div class="section-head" style="margin-top:0">
+      <div><h3>Player leaderboard</h3><p>Individual performance across completed matches.</p></div>
+      <span class="pill blue">${t.name}</span>
+    </div>
+    <div class="panel">
+      <div class="leader-row header"><span>#</span><span>PLAYER</span><span>PLAYED</span><span>WINS</span><span>WIN %</span><span>DIFF</span></div>
+      ${stats.map((s, i) => `
+        <div class="leader-row">
+          <span class="rank">${String(i + 1).padStart(2, '0')}</span>
+          <span class="leader-name">${avatar(player(s.playerId))}${esc(player(s.playerId).name)}</span>
+          <span class="leader-val">${s.played}</span>
+          <span class="leader-val">${s.wins}</span>
+          <span class="leader-val">${s.winRate}%</span>
+          <span class="leader-val">${s.pointDiff > 0 ? '+' : ''}${s.pointDiff}</span>
+        </div>
+      `).join('')}
+    </div>
+  `;
+}
+
+function renderAwards() {
+  const t = activeT(), root = $('#view-awards');
+  if (!t) {
+    root.innerHTML = '<div class="panel empty"><b>Awards appear here</b><p>Complete matches to calculate player awards.</p></div>';
+    return;
+  }
+  const stats = calcStats(t), potms = t.matches.filter(m => m.playerOfMatch), topPotm = [...stats].sort((a, b) => b.potm - a.potm)[0], mvp = [...stats].sort((a, b) => (b.wins * 3 + b.potm * 2 + b.winRate / 10 + b.pointDiff / 100) - (a.wins * 3 + a.potm * 2 + a.winRate / 10 + a.pointDiff / 100))[0];
+  root.innerHTML = `
+    <div class="section-head" style="margin-top:0">
+      <div><h3>Tournament awards</h3><p>Player of the Match is suggested from match performance and confirmed by the organizer.</p></div>
+    </div>
+    <div class="grid award-grid">
+      <div class="panel award-card"><div class="award-icon">🏆</div><h4>Tournament MVP</h4><p>Performance-based leaderboard</p><strong>${mvp && mvp.played ? esc(player(mvp.playerId).name) : 'Pending'}</strong></div>
+      <div class="panel award-card"><div class="award-icon">⭐</div><h4>Most POTM Awards</h4><p>Organizer-approved match awards</p><strong>${topPotm && topPotm.potm ? esc(player(topPotm.playerId).name) : 'Pending'}</strong></div>
+      <div class="panel award-card"><div class="award-icon">🎯</div><h4>Best Win Rate</h4><p>Minimum one completed match</p><strong>${stats.some(s => s.played) ? stats.find(s => s.played).winRate + '% · ' + esc(player(stats.find(s => s.played).playerId).name) : 'Pending'}</strong></div>
+    </div>
+    <div class="section-head">
+      <div><h3>Player of the Match approvals</h3><p>Suggested player is based on the winning side's individual stats; organizer can change the selection.</p></div>
+    </div>
+    <div class="panel">
+      ${t.matches.filter(m => m.status === 'completed').length ? t.matches.filter(m => m.status === 'completed').map(m => `
+        <div class="leader-row" style="grid-template-columns:90px 1fr 1fr auto">
+          <span class="rank">${m.code}</span>
+          <span>${esc(teamName(m.teamA))} <span class="muted">vs</span> ${esc(teamName(m.teamB))}</span>
+          <span class="muted">${m.playerOfMatch ? esc(player(m.playerOfMatch).name) : 'Not approved'}</span>
+          ${canAdmin() ? `<button class="btn ghost small" data-potm="${m.id}">Review suggestion</button>` : ''}
+        </div>
+      `).join('') : '<div class="empty"><b>No completed matches</b><p>Player award suggestions will appear when matches are completed.</p></div>'}
+    </div>
+  `;
+}
+
+function renderHistory() {
+  const root = $('#view-history');
+  root.innerHTML = `
+    <div class="section-head" style="margin-top:0">
+      <div><h3>Tournament archive</h3><p>Past tournaments and their final results.</p></div>
+    </div>
+    ${db.tournaments.length ? `
+      <div class="panel table-wrap">
+        <table>
+          <thead><tr><th>Tournament</th><th>Date</th><th>Players</th><th>Matches</th><th>Status</th><th></th></tr></thead>
+          <tbody>
+            ${db.tournaments.map(t => `
+              <tr>
+                <td><b>${esc(t.name)}</b></td>
+                <td>${esc(t.date)}</td>
+                <td>${t.playerIds.length}</td>
+                <td>${t.matches.filter(m => m.status === 'completed').length}/${t.matches.length}</td>
+                <td><span class="pill ${t.status === 'completed' ? 'blue' : 'green'}">${t.status}</span></td>
+                <td><button class="btn ghost small" data-activate="${t.id}">${t.id === db.activeTournamentId ? 'Active' : 'Open'}</button></td>
+              </tr>
+            `).join('')}
+          </tbody>
+        </table>
+      </div>` : '<div class="panel empty"><div class="empty-icon">◷</div><b>No tournament history</b><p>Your completed tournaments will be saved here.</p></div>'}
+  `;
+}
+
+function modal(html) {
+  $('#modalRoot').innerHTML = `<div class="modal-backdrop"><div class="modal">${html}</div></div>`;
+  $$('[data-close]').forEach(b => b.onclick = closeModal);
+  $('#modalRoot .modal-backdrop').onclick = e => {
+    if (e.target.classList.contains('modal-backdrop')) closeModal();
+  };
+}
+
+function closeModal() {
+  $('#modalRoot').innerHTML = '';
+}
+
+function suggestedPotm(m) {
+  const winning = m.winner === m.teamA.id ? m.teamA : m.teamB;
+  const stats = calcStats(activeT());
+  return winning.players.map(pid => stats.find(s => s.playerId === pid)).filter(Boolean).sort((a, b) => b.wins - a.wins || b.pointDiff - a.pointDiff || b.potm - a.potm)[0]?.playerId || winning.players[0];
+}
+
+function potmModal(matchId) {
+  const m = activeT().matches.find(x => x.id === matchId);
+  if (!m) return;
+  const suggested = suggestedPotm(m);
+  const winning = m.winner === m.teamA.id ? m.teamA : m.teamB;
+  modal(`
+    <div class="modal-head"><h3>Player of the Match</h3><button class="modal-close" data-close>×</button></div>
+    <p class="muted" style="font-size:11px">Suggested automatically from the winning team's player statistics. Organizer has final approval.</p>
+    <form id="potmForm">
+      <div class="field"><label>SELECT PLAYER</label>
+        <select name="player">
+          ${winning.players.map(pid => `<option value="${pid}" ${pid === (m.playerOfMatch || suggested) ? 'selected' : ''}>${esc(player(pid).name)}${pid === suggested ? ' · Suggested' : ''}</option>`).join('')}
+        </select>
+      </div>
+      <div class="modal-actions"><button type="button" class="btn ghost" data-close>Cancel</button><button class="btn primary">Approve award</button></div>
+    </form>
+  `);
+  $('#potmForm').onsubmit = async e => {
+    e.preventDefault();
+    try {
+      await api('/api/matches/' + matchId, { method: 'PATCH', body: JSON.stringify({ playerOfMatch: e.target.player.value }) });
+      closeModal();
+      notify('Player of the Match approved.');
+    } catch (err) {
+      notify(err.message, true);
+    }
+  };
+}
+
+async function scoreClick(matchId, side, delta) {
+  try {
+    await api('/api/matches/' + matchId + '/score', { method: 'POST', body: JSON.stringify({ side, delta }) });
+  } catch (e) {
+    notify(e.message, true);
+  }
+}
+
+async function undo(matchId) {
+  try {
+    await api('/api/matches/' + matchId + '/undo', { method: 'POST', body: '{}' });
+    notify('Last score update undone.');
+  } catch (e) {
+    notify(e.message, true);
+  }
+}
+
+async function reopen(matchId) {
+  if (!confirm('Reopen this completed match?')) return;
+  try {
+    await api('/api/matches/' + matchId, { method: 'PATCH', body: JSON.stringify({ status: 'reopen' }) });
+    notify('Match reopened.');
+  } catch (e) {
+    notify(e.message, true);
+  }
+}
+
+function publicView() {
+  const t = activeT(), root = $('#publicContent');
+  if (!t) {
+    root.innerHTML = '<div class="public-title"><div><div class="eyebrow">BPL · LIVE BOARD</div><h1>Waiting for the next match</h1><p>The tournament scoreboard will appear here when an organizer creates a tournament.</p></div></div>';
+    return;
+  }
+  const matches = t.matches || [], stats = calcStats(t);
+  root.innerHTML = `
+    <div class="public-title">
+      <div>
+        <div class="eyebrow">${esc(t.date)} ${t.venue ? ' · ' + esc(t.venue) : ''}</div>
+        <h1>${esc(t.name)}</h1>
+        <p>${t.playerIds.length} players · ${t.pairingMode === 'fixed' ? 'Fixed teams' : 'Rotating partners'} · ${matches.filter(m => m.status === 'completed').length}/${matches.length} matches completed</p>
+      </div>
+      <span class="pill green">● LIVE UPDATES</span>
+    </div>
+    <div class="public-match-grid">
+      ${matches.map(m => {
+        const g = matchScore(m);
+        return `
+          <article class="public-match">
+            <div class="match-top"><small>${m.code} · ROUND ${m.round}</small><span class="pill ${m.status === 'live' ? 'green' : ''}">${m.status.toUpperCase()}</span></div>
+            <div class="match-teams">
+              <div class="team-side"><b>${esc(teamName(m.teamA))}</b><small>TEAM A</small></div>
+              <span class="versus">VS</span>
+              <div class="team-side"><b>${esc(teamName(m.teamB))}</b><small>TEAM B</small></div>
+            </div>
+            <div class="score-row"><span class="score-number">${g.a}</span><span class="score-sep">:</span><span class="score-number">${g.b}</span></div>
+            <div class="match-foot"><span>GAME ${(m.currentGame || 0) + 1}</span><span>${m.status === 'completed' ? 'Winner: ' + esc(teamName(m.winner === m.teamA.id ? m.teamA : m.teamB)) : 'Best of 3'}</span></div>
+          </article>
+        `;
+      }).join('')}
+    </div>
+    <div class="public-standings">
+      <h3>Player leaderboard</h3>
+      <div class="table-wrap">
+        <table>
+          <thead><tr><th>#</th><th>Player</th><th>Played</th><th>Wins</th><th>Win %</th><th>POTM</th></tr></thead>
+          <tbody>
+            ${stats.map((s, i) => `<tr><td>${i + 1}</td><td>${esc(player(s.playerId).name)}</td><td>${s.played}</td><td>${s.wins}</td><td>${s.winRate}%</td><td>${s.potm}</td></tr>`).join('')}
+          </tbody>
+        </table>
+      </div>
+    </div>
+  `;
+}
+
+async function refresh() {
+  try {
+    db = await api('/api/state');
+    render();
+    if ($('#publicScreen') && !$('#publicScreen').classList.contains('hidden')) publicView();
+  } catch (e) {
+    console.error('Refresh error:', e);
+  }
+}
+
+function connectWS() {
+  if (ws && (ws.readyState === 0 || ws.readyState === 1)) return;
+  const base = getServerBase();
+  let wsUrl;
+  if (base) {
+    try {
+      const u = new URL(base);
+      const proto = u.protocol === 'https:' ? 'wss:' : 'ws:';
+      wsUrl = `${proto}//${u.host}`;
+    } catch {
+      return;
+    }
+  } else {
+    const proto = location.protocol === 'https:' ? 'wss:' : 'ws:';
+    wsUrl = `${proto}://${location.host}`;
+  }
+  try {
+    ws = new WebSocket(wsUrl);
+    ws.onmessage = e => {
+      try {
+        const msg = JSON.parse(e.data);
+        if (msg.type === 'state') {
+          db = msg.data;
+          render();
+          if ($('#publicScreen') && !$('#publicScreen').classList.contains('hidden')) publicView();
+        }
+      } catch (err) {
+        console.error(err);
+      }
+    };
+    ws.onclose = () => setTimeout(connectWS, 2500);
+    ws.onerror = () => ws.close();
+  } catch (e) {
+    setTimeout(connectWS, 3000);
+  }
+}
+
+$('#loginForm').onsubmit = async e => {
+  e.preventDefault();
+  try {
+    const pin = $('#pinInput').value;
+    session = await api('/api/login', { method: 'POST', body: JSON.stringify({ pin }) });
+    localStorage.setItem('rallySession', JSON.stringify(session));
+    showApp();
+  } catch (err) {
+    notify(err.message, true);
+  }
+};
+
+function showApp() {
+  if (!session) return;
+  $('#loginScreen').classList.add('hidden');
+  $('#app').classList.remove('hidden');
+  $('#roleName').textContent = session.role === 'admin' ? 'Organizer' : 'Authorized scorer';
+  $('#userAvatar').textContent = session.role === 'admin' ? 'O' : 'S';
+  $$('.nav-item').forEach(b => b.addEventListener('click', () => setView(b.dataset.view)));
+  if (!canAdmin()) {
+    $$('.nav-item').filter(b => ['players', 'tournament', 'history', 'awards'].includes(b.dataset.view)).forEach(b => b.classList.add('hidden'));
+  }
+  updateServerLabel();
+  connectWS();
+  refresh();
+  setView('dashboard');
+}
+
+$('#logoutBtn').onclick = () => {
+  session = null;
+  localStorage.removeItem('rallySession');
+  location.reload();
+};
+
+$('#serverSettingsBtn')?.addEventListener('click', serverConfigModal);
+$('#sidebarServerBtn')?.addEventListener('click', serverConfigModal);
+
+document.addEventListener('click', async e => {
+  const goto = e.target.closest('[data-goto]');
+  if (goto) { setView(goto.dataset.goto); return; }
+  const score = e.target.closest('[data-score]');
+  if (score) { scoreClick(score.dataset.score, score.dataset.side, Number(score.dataset.delta)); return; }
+  const undoBtn = e.target.closest('[data-undo]');
+  if (undoBtn) { undo(undoBtn.dataset.undo); return; }
+  const potm = e.target.closest('[data-potm]');
+  if (potm) { potmModal(potm.dataset.potm); return; }
+  const reopenBtn = e.target.closest('[data-reopen]');
+  if (reopenBtn) { reopen(reopenBtn.dataset.reopen); return; }
+  const edit = e.target.closest('[data-edit-player]');
+  if (edit) { playerModal(player(edit.dataset.editPlayer)); return; }
+  const del = e.target.closest('[data-delete-player]');
+  if (del) {
+    if (confirm('Delete this player from the directory?')) {
+      try {
+        await api('/api/players/' + del.dataset.deletePlayer, { method: 'DELETE' });
+        notify('Player deleted.');
+      } catch (err) {
+        notify(err.message, true);
+      }
+    }
+    return;
+  }
+  const activate = e.target.closest('[data-activate]');
+  if (activate) {
+    try {
+      await api('/api/tournaments/' + activate.dataset.activate + '/activate', { method: 'POST', body: '{}' });
+      notify('Tournament activated.');
+    } catch (err) {
+      notify(err.message, true);
+    }
+  }
+});
+
+(async () => {
+  updateServerLabel();
+  if (new URLSearchParams(location.search).get('view') === 'public') {
+    $('#loginScreen').classList.add('hidden');
+    $('#app').classList.add('hidden');
+    $('#publicScreen').classList.remove('hidden');
+    await refresh();
+    connectWS();
+    return;
+  }
+  try {
+    const saved = JSON.parse(localStorage.getItem('rallySession') || 'null');
+    if (saved) {
+      session = saved;
+      const check = await api('/api/state');
+      db = check;
+      showApp();
+    }
+  } catch {
+    localStorage.removeItem('rallySession');
+  }
+})();

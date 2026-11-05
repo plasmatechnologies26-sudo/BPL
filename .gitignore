@@ -1,0 +1,27 @@
+# Dependencies
+node_modules/
+package-lock.json
+
+# Environment and logs
+.env
+*.log
+npm-debug.log*
+
+# Android build outputs
+android/.gradle/
+android/app/build/
+android/build/
+android/captures/
+android/.idea/
+android/*.iml
+
+# iOS build outputs
+ios/App/build/
+ios/App/DerivedData/
+ios/App/.idea/
+ios/App/*.xcworkspace/xcuserdata/
+ios/App/*.xcodeproj/xcuserdata/
+
+# OS files
+.DS_Store
+Thumbs.db
