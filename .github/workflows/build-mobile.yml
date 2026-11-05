@@ -18,11 +18,11 @@ jobs:
       - name: Set up Node.js
         uses: actions/setup-node@v4
         with:
-          node-version: 20
+          node-version: 22
           cache: 'npm'
 
       - name: Install dependencies
-        run: npm install
+        run: npm ci || npm install
 
       - name: Sync Capacitor Android
         run: npx cap sync android
@@ -61,11 +61,11 @@ jobs:
       - name: Set up Node.js
         uses: actions/setup-node@v4
         with:
-          node-version: 20
+          node-version: 22
           cache: 'npm'
 
       - name: Install dependencies
-        run: npm install
+        run: npm ci || npm install
 
       - name: Sync Capacitor iOS
         run: npx cap sync ios
@@ -102,4 +102,3 @@ jobs:
             ios/App/build/Build/Products/Release-iphoneos/BPL-iOS-App.ipa
             ios/App/build/Build/Products/Release-iphoneos/BPL-iOS-App.app.zip
           if-no-files-found: warn
-
