@@ -12,14 +12,30 @@ const defaultInitialPlayers = [
   { id: 'player_8', name: 'Karthi', nickname: 'Defense Wall', photo: '' }
 ];
 
-let db = { players: defaultInitialPlayers, tournaments: [], activeTournamentId: null }, session = null, currentView = 'dashboard', ws = null;
+function loadLocalDb() {
+  try {
+    const raw = localStorage.getItem('bpl_device_db');
+    if (raw) {
+      const parsed = JSON.parse(raw);
+      if (parsed && Array.isArray(parsed.players) && parsed.players.length > 0) return parsed;
+    }
+  } catch {}
+  const initial = { players: [...defaultInitialPlayers], tournaments: [], activeTournamentId: null };
+  saveLocalDb(initial);
+  return initial;
+}
+
+function saveLocalDb(data) {
+  try {
+    localStorage.setItem('bpl_device_db', JSON.stringify(data));
+  } catch {}
+}
+
+let db = loadLocalDb(), session = null, currentView = 'dashboard', ws = null;
 
 function getServerBase() {
   const custom = localStorage.getItem('bpl_server_url');
   if (custom) return custom.replace(/\/+$/, '');
-  if (location.protocol === 'http:' || location.protocol === 'https:') {
-    return location.origin;
-  }
   return '';
 }
 
@@ -33,8 +49,9 @@ function updateServerLabel() {
   const s = getServerBase();
   const label = $('#currentServerLabel');
   if (label) {
-    if (!s || (typeof location !== 'undefined' && s === location.origin)) label.textContent = 'Auto (Host)';
-    else {
+    if (!s) {
+      label.textContent = 'Device (Offline Standalone)';
+    } else {
       try { label.textContent = new URL(s).host; }
       catch { label.textContent = s.slice(0, 18); }
     }
@@ -113,23 +130,313 @@ function serverConfigModal() {
   };
 }
 
+function genId(prefix = 'id') {
+  return `${prefix}_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 7)}`;
+}
+
+function localShuffle(items) {
+  const a = [...items];
+  for (let i = a.length - 1; i > 0; i--) {
+    const j = Math.floor(Math.random() * (i + 1));
+    [a[i], a[j]] = [a[j], a[i]];
+  }
+  return a;
+}
+
+function localMakeMatch(round, teamA, teamB, index) {
+  return {
+    id: genId('match'),
+    code: `R${round}-M${index}`,
+    round,
+    teamA,
+    teamB,
+    games: [{ a: 0, b: 0, completed: false }],
+    scoreHistory: [],
+    currentGame: 0,
+    status: 'upcoming',
+    winner: null,
+    playerOfMatch: null,
+    notes: ''
+  };
+}
+
+function localRoundRobinTeams(teams) {
+  const list = [...teams];
+  if (list.length % 2) list.push(null);
+  const rounds = [];
+  for (let r = 0; r < list.length - 1; r++) {
+    const matches = [];
+    for (let i = 0; i < list.length / 2; i++) {
+      const a = list[i], b = list[list.length - 1 - i];
+      if (a && b) matches.push([a, b]);
+    }
+    rounds.push(matches);
+    const fixed = list[0], rest = list.slice(1);
+    rest.unshift(rest.pop());
+    list.splice(0, list.length, fixed, ...rest);
+  }
+  return rounds;
+}
+
+function localGenerateFixed(tournament, players) {
+  const ordered = tournament.teamSelection === 'manual' ? players : localShuffle(players);
+  const teams = [];
+  for (let i = 0; i + 1 < ordered.length; i += 2) {
+    teams.push({ id: genId('team'), name: `Team ${teams.length + 1}`, players: [ordered[i].id, ordered[i + 1].id] });
+  }
+  tournament.teams = teams;
+  tournament.reserves = ordered.length % 2 ? [ordered[ordered.length - 1].id] : [];
+  let rounds = [];
+  if (tournament.format === 'knockout') {
+    const shuffled = localShuffle(teams);
+    const matches = [];
+    for (let i = 0; i + 1 < shuffled.length; i += 2) matches.push([shuffled[i], shuffled[i + 1]]);
+    if (shuffled.length % 2) tournament.byeTeam = shuffled[shuffled.length - 1].id;
+    rounds = [matches];
+  } else {
+    rounds = localRoundRobinTeams(teams);
+  }
+  tournament.matches = rounds.flatMap((r, i) => r.map((pair, j) => localMakeMatch(i + 1, pair[0], pair[1], j + 1)));
+  tournament.roundCount = rounds.length;
+}
+
+function localGenerateRotating(tournament, players) {
+  const count = players.length;
+  const rounds = Math.max(1, Math.min(8, tournament.rounds || Math.floor(count / 2)));
+  const matches = [];
+  const partnerCounts = {};
+  const byeCounts = {};
+  players.forEach(p => { byeCounts[p.id] = 0; });
+  for (let r = 1; r <= rounds; r++) {
+    let pool = localShuffle(players);
+    pool.sort((a, b) => (byeCounts[a.id] || 0) - (byeCounts[b.id] || 0));
+    let matchIndex = 1;
+    while (pool.length >= 4) {
+      const group = pool.splice(0, 4);
+      const pairOptions = [
+        [[group[0], group[1]], [group[2], group[3]]],
+        [[group[0], group[2]], [group[1], group[3]]],
+        [[group[0], group[3]], [group[1], group[2]]]
+      ];
+      let chosen = pairOptions[0], best = Infinity;
+      for (const option of pairOptions) {
+        const score = option.reduce((sum, pair) => sum + (partnerCounts[[pair[0].id, pair[1].id].sort().join(':')] || 0) * 100, 0);
+        if (score < best) { best = score; chosen = option; }
+      }
+      chosen.forEach(pair => {
+        const key = [pair[0].id, pair[1].id].sort().join(':');
+        partnerCounts[key] = (partnerCounts[key] || 0) + 1;
+      });
+      const teamA = { id: genId('team'), name: `R${r} Pair ${matchIndex}A`, players: chosen[0].map(p => p.id) };
+      const teamB = { id: genId('team'), name: `R${r} Pair ${matchIndex}B`, players: chosen[1].map(p => p.id) };
+      matches.push(localMakeMatch(r, teamA, teamB, matchIndex++));
+    }
+    pool.forEach(p => { byeCounts[p.id] = (byeCounts[p.id] || 0) + 1; });
+  }
+  tournament.teams = [];
+  tournament.matches = matches;
+  tournament.roundCount = rounds;
+  tournament.byes = byeCounts;
+}
+
+function handleLocalApi(path, opts = {}) {
+  const method = (opts.method || 'GET').toUpperCase();
+  let body = {};
+  try { if (opts.body) body = JSON.parse(opts.body); } catch {}
+  let localDb = loadLocalDb();
+
+  // Login
+  if (path === '/api/login' && method === 'POST') {
+    const pin = String(body.pin || '').trim();
+    if (pin === '2468') return { role: 'admin', name: 'Organizer', pin };
+    if (pin === '1357') return { role: 'scorer', name: 'Authorized scorer', pin };
+    throw new Error('Incorrect PIN. (Organizer: 2468, Scorer: 1357)');
+  }
+
+  // Health and state
+  if (path === '/api/health') return { ok: true, mode: 'local' };
+  if (path === '/api/state') return localDb;
+
+  // Players
+  if (path === '/api/players' && method === 'POST') {
+    if (!body.name?.trim()) throw new Error('Player name is required');
+    const p = { id: genId('player'), name: body.name.trim(), nickname: (body.nickname || '').trim(), photo: body.photo || '', createdAt: new Date().toISOString() };
+    localDb.players.push(p);
+    saveLocalDb(localDb);
+    db = localDb;
+    return p;
+  }
+  if (path.startsWith('/api/players/') && method === 'PATCH') {
+    const pid = path.split('/')[3];
+    const p = localDb.players.find(x => x.id === pid);
+    if (!p) throw new Error('Player not found');
+    Object.assign(p, { name: body.name?.trim() || p.name, nickname: body.nickname ?? p.nickname, photo: body.photo ?? p.photo });
+    saveLocalDb(localDb);
+    db = localDb;
+    return p;
+  }
+  if (path.startsWith('/api/players/') && method === 'DELETE') {
+    const pid = path.split('/')[3];
+    localDb.players = localDb.players.filter(x => x.id !== pid);
+    saveLocalDb(localDb);
+    db = localDb;
+    return { ok: true };
+  }
+
+  // Tournaments
+  if (path === '/api/tournaments' && method === 'POST') {
+    const selected = (body.playerIds || []).map(pid => localDb.players.find(p => p.id === pid)).filter(Boolean);
+    if (selected.length < 4) throw new Error('At least 4 players are required for doubles.');
+    const t = {
+      id: genId('tournament'),
+      name: body.name?.trim() || 'Badminton Tournament',
+      date: body.date || new Date().toISOString().slice(0, 10),
+      venue: body.venue || '',
+      pairingMode: body.pairingMode || 'fixed',
+      teamSelection: body.teamSelection || 'random',
+      format: body.format || 'roundrobin',
+      status: 'active',
+      playerIds: selected.map(p => p.id),
+      matches: [],
+      teams: [],
+      createdAt: new Date().toISOString(),
+      rounds: Number(body.rounds) || Math.max(1, Math.floor(selected.length / 2))
+    };
+    if (t.pairingMode === 'rotating') localGenerateRotating(t, selected);
+    else localGenerateFixed(t, selected);
+    localDb.tournaments.unshift(t);
+    localDb.activeTournamentId = t.id;
+    saveLocalDb(localDb);
+    db = localDb;
+    return t;
+  }
+
+  if (path.match(/^\/api\/tournaments\/([^/]+)\/activate$/) && method === 'POST') {
+    const tid = path.split('/')[3];
+    localDb.activeTournamentId = tid;
+    saveLocalDb(localDb);
+    db = localDb;
+    return { ok: true };
+  }
+
+  if (path.match(/^\/api\/tournaments\/([^/]+)\/complete$/) && method === 'POST') {
+    const tid = path.split('/')[3];
+    const t = localDb.tournaments.find(x => x.id === tid);
+    if (t) {
+      t.status = 'completed';
+      t.completedAt = new Date().toISOString();
+      saveLocalDb(localDb);
+      db = localDb;
+    }
+    return t || { ok: true };
+  }
+
+  // Matches & live score
+  if (path.match(/^\/api\/matches\/([^/]+)\/score$/) && method === 'POST') {
+    const mid = path.split('/')[3];
+    const t = localDb.tournaments.find(x => x.id === localDb.activeTournamentId);
+    if (!t) throw new Error('No active tournament');
+    const m = t.matches.find(x => x.id === mid);
+    if (!m) throw new Error('Match not found');
+    if (m.status === 'completed') throw new Error('Match is already completed. Reopen it to edit.');
+    const game = m.games[m.currentGame];
+    const side = body.side;
+    const delta = Number(body.delta || 0);
+    if (!['a', 'b'].includes(side) || ![-1, 1].includes(delta)) throw new Error('Invalid score update');
+    game[side] = Math.max(0, game[side] + delta);
+    m.scoreHistory = m.scoreHistory || [];
+    m.scoreHistory.push({ gameIndex: m.currentGame, side, delta });
+    m.status = 'live';
+    const a = game.a, b = game.b, high = Math.max(a, b), diff = Math.abs(a - b);
+    if ((high >= 21 && diff >= 2) || high === 30) {
+      game.completed = true;
+      game.winner = a > b ? 'a' : 'b';
+      const winsA = m.games.filter(g => g.winner === 'a').length;
+      const winsB = m.games.filter(g => g.winner === 'b').length;
+      if (winsA >= 2 || winsB >= 2) {
+        m.status = 'completed';
+        m.winner = winsA > winsB ? m.teamA.id : m.teamB.id;
+        m.completedAt = new Date().toISOString();
+      } else {
+        m.currentGame++;
+        m.games.push({ a: 0, b: 0, completed: false });
+      }
+    }
+    saveLocalDb(localDb);
+    db = localDb;
+    return m;
+  }
+
+  if (path.match(/^\/api\/matches\/([^/]+)\/undo$/) && method === 'POST') {
+    const mid = path.split('/')[3];
+    const t = localDb.tournaments.find(x => x.id === localDb.activeTournamentId);
+    const m = t?.matches.find(x => x.id === mid);
+    if (!m) throw new Error('Match not found');
+    if (m.status === 'completed') throw new Error('Reopen the match before undoing.');
+    m.scoreHistory = m.scoreHistory || [];
+    const last = m.scoreHistory.pop();
+    if (last) {
+      const g = m.games[last.gameIndex];
+      if (g) {
+        g[last.side] = Math.max(0, g[last.side] - last.delta);
+        g.completed = false;
+        delete g.winner;
+      }
+      m.currentGame = last.gameIndex;
+    }
+    m.status = m.games.some(x => x.a || x.b) ? 'live' : 'upcoming';
+    saveLocalDb(localDb);
+    db = localDb;
+    return m;
+  }
+
+  if (path.match(/^\/api\/matches\/([^/]+)$/) && method === 'PATCH') {
+    const mid = path.split('/')[3];
+    const t = localDb.tournaments.find(x => x.id === localDb.activeTournamentId);
+    const m = t?.matches.find(x => x.id === mid);
+    if (!m) throw new Error('Match not found');
+    if (body.playerOfMatch !== undefined) m.playerOfMatch = body.playerOfMatch || null;
+    if (body.status === 'reopen') {
+      m.status = 'live';
+      m.winner = null;
+      m.games = m.games.slice(0, 3);
+      m.games.forEach(g => { g.completed = false; delete g.winner; });
+      m.currentGame = Math.min(m.games.length - 1, m.games.findIndex(g => !g.winner));
+      if (m.currentGame < 0) m.currentGame = m.games.length - 1;
+    }
+    if (Array.isArray(body.games)) {
+      m.games = body.games;
+      m.currentGame = m.games.length - 1;
+      m.status = 'live';
+      m.winner = null;
+    }
+    saveLocalDb(localDb);
+    db = localDb;
+    return m;
+  }
+
+  return { ok: true };
+}
+
 const activeT = () => (db?.tournaments || []).find(t => t.id === db?.activeTournamentId) || null;
 const player = id => (db?.players || []).find(p => p.id === id) || { name: 'Player', photo: '', nickname: '' };
 const headers = () => session ? { 'Content-Type': 'application/json', 'x-user-role': session.role, 'x-user-pin': session.pin } : { 'Content-Type': 'application/json' };
 
 async function api(url, opts = {}) {
-  const target = fullUrl(url);
-  try {
-    const res = await fetch(target, { ...opts, headers: { ...headers(), ...(opts.headers || {}) } });
-    const data = await res.json().catch(() => ({}));
-    if (!res.ok) throw new Error(data.error || 'Request failed');
-    return data;
-  } catch (err) {
-    if (!getServerBase() && (!location.hostname || location.hostname === 'localhost' || location.protocol === 'capacitor:')) {
-      serverConfigModal();
+  const custom = localStorage.getItem('bpl_server_url');
+  if (custom) {
+    try {
+      const target = fullUrl(url);
+      const res = await fetch(target, { ...opts, headers: { ...headers(), ...(opts.headers || {}) } });
+      const data = await res.json().catch(() => ({}));
+      if (!res.ok) throw new Error(data.error || 'Request failed');
+      return data;
+    } catch (err) {
+      console.warn('Remote server unreachable, falling back to Device Standalone engine:', err.message);
+      return handleLocalApi(url, opts);
     }
-    throw err;
   }
+  return handleLocalApi(url, opts);
 }
 
 function notify(msg, error = false) {
@@ -799,18 +1106,14 @@ async function refresh() {
 function connectWS() {
   if (ws && (ws.readyState === 0 || ws.readyState === 1)) return;
   const base = getServerBase();
+  if (!base) return;
   let wsUrl;
-  if (base) {
-    try {
-      const u = new URL(base);
-      const proto = u.protocol === 'https:' ? 'wss:' : 'ws:';
-      wsUrl = `${proto}//${u.host}`;
-    } catch {
-      return;
-    }
-  } else {
-    const proto = location.protocol === 'https:' ? 'wss:' : 'ws:';
-    wsUrl = `${proto}://${location.host}`;
+  try {
+    const u = new URL(base);
+    const proto = u.protocol === 'https:' ? 'wss:' : 'ws:';
+    wsUrl = `${proto}//${u.host}`;
+  } catch {
+    return;
   }
   try {
     ws = new WebSocket(wsUrl);
@@ -826,10 +1129,10 @@ function connectWS() {
         console.error(err);
       }
     };
-    ws.onclose = () => setTimeout(connectWS, 2500);
+    ws.onclose = () => setTimeout(connectWS, 4000);
     ws.onerror = () => ws.close();
   } catch (e) {
-    setTimeout(connectWS, 3000);
+    setTimeout(connectWS, 5000);
   }
 }
 
