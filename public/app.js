@@ -1,6 +1,18 @@
 const $ = s => document.querySelector(s);
 const $$ = s => [...document.querySelectorAll(s)];
-let db = { players: [], tournaments: [], activeTournamentId: null }, session = null, currentView = 'dashboard', ws = null;
+
+const defaultInitialPlayers = [
+  { id: 'player_1', name: 'Arun', nickname: 'Smash Specialist', photo: '' },
+  { id: 'player_2', name: 'Mani', nickname: 'Net Play Pro', photo: '' },
+  { id: 'player_3', name: 'Shabaree', nickname: 'Ace', photo: '' },
+  { id: 'player_4', name: 'Lokesh', nickname: 'Power Play', photo: '' },
+  { id: 'player_5', name: 'Nowful', nickname: 'Spin Master', photo: '' },
+  { id: 'player_6', name: 'Abishek', nickname: 'Rocket', photo: '' },
+  { id: 'player_7', name: 'Pawan', nickname: 'Drop Shot', photo: '' },
+  { id: 'player_8', name: 'Karthi', nickname: 'Defense Wall', photo: '' }
+];
+
+let db = { players: defaultInitialPlayers, tournaments: [], activeTournamentId: null }, session = null, currentView = 'dashboard', ws = null;
 
 function getServerBase() {
   const custom = localStorage.getItem('bpl_server_url');
@@ -101,8 +113,8 @@ function serverConfigModal() {
   };
 }
 
-const activeT = () => db.tournaments.find(t => t.id === db.activeTournamentId) || null;
-const player = id => db.players.find(p => p.id === id) || { name: 'Unknown player', photo: '' };
+const activeT = () => (db?.tournaments || []).find(t => t.id === db?.activeTournamentId) || null;
+const player = id => (db?.players || []).find(p => p.id === id) || { name: 'Player', photo: '', nickname: '' };
 const headers = () => session ? { 'Content-Type': 'application/json', 'x-user-role': session.role, 'x-user-pin': session.pin } : { 'Content-Type': 'application/json' };
 
 async function api(url, opts = {}) {
@@ -130,18 +142,21 @@ function notify(msg, error = false) {
 }
 
 function esc(s = '') {
-  return String(s).replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
+  return String(s || '').replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
 }
 
 function avatar(p, cls = 'player-avatar') {
+  if (!p) return `<span class="${cls}">?</span>`;
   return `<span class="${cls}">${p.photo ? `<img src="${p.photo}" alt="">` : esc((p.name || '?').split(' ').map(x => x[0]).join('').slice(0, 2).toUpperCase())}</span>`;
 }
 
 function teamName(team) {
-  return team.players.map(id => player(id).name).join(' + ');
+  if (!team || !Array.isArray(team.players)) return 'TBD';
+  return team.players.map(id => player(id)?.name || 'Player').join(' + ');
 }
 
 function matchScore(m) {
+  if (!m || !Array.isArray(m.games) || m.games.length === 0) return { a: 0, b: 0 };
   const g = m.games[m.currentGame] || m.games[m.games.length - 1] || { a: 0, b: 0 };
   return g;
 }
@@ -181,15 +196,31 @@ function setView(view) {
 
 function render() {
   if ($('#publicScreen') && !$('#publicScreen').classList.contains('hidden')) return;
-  ({
-    dashboard: renderDashboard,
-    players: renderPlayers,
-    tournament: renderTournament,
-    matches: renderMatches,
-    leaderboard: renderLeaderboard,
-    awards: renderAwards,
-    history: renderHistory
-  }[currentView] || renderDashboard)();
+  try {
+    const fn = {
+      dashboard: renderDashboard,
+      players: renderPlayers,
+      tournament: renderTournament,
+      matches: renderMatches,
+      leaderboard: renderLeaderboard,
+      awards: renderAwards,
+      history: renderHistory
+    }[currentView] || renderDashboard;
+    fn();
+  } catch (err) {
+    console.error('Render error in view', currentView, err);
+    const root = $(`#view-${currentView}`);
+    if (root) {
+      root.innerHTML = `
+        <div class="panel empty" style="text-align:center;padding:32px 16px">
+          <div style="font-size:32px;margin-bottom:8px">⚠️</div>
+          <b>Unable to display this view</b>
+          <p class="muted" style="margin:8px 0 16px;font-size:12px">${esc(err.message || 'Render error')}</p>
+          <button class="btn primary small" onclick="refresh();">↻ Refresh View</button>
+        </div>
+      `;
+    }
+  }
 }
 
 function matchCard(m) {
@@ -332,18 +363,31 @@ function statsFor(pid) {
 
 function calcStats(t) {
   const stats = {};
-  (t?.playerIds || []).forEach(pid => stats[pid] = { playerId: pid, played: 0, wins: 0, losses: 0, pointsFor: 0, pointsAgainst: 0, potm: 0 });
-  (t?.matches || []).filter(m => m.status === 'completed').forEach(m => {
-    [m.teamA, m.teamB].forEach((team, idx) => team.players.forEach(pid => {
-      if (!stats[pid]) return;
-      const s = stats[pid];
-      s.played++;
-      if (m.winner === team.id) s.wins++; else s.losses++;
-      m.games.forEach(g => { s.pointsFor += idx === 0 ? g.a : g.b; s.pointsAgainst += idx === 0 ? g.b : g.a; });
-    }));
+  const playerIds = (t?.playerIds && Array.isArray(t.playerIds)) ? t.playerIds : (db?.players || []).map(p => p.id);
+  playerIds.forEach(pid => {
+    stats[pid] = { playerId: pid, played: 0, wins: 0, losses: 0, pointsFor: 0, pointsAgainst: 0, potm: 0 };
+  });
+  (t?.matches || []).filter(m => m && m.status === 'completed').forEach(m => {
+    [m.teamA, m.teamB].forEach((team, idx) => {
+      if (!team || !Array.isArray(team.players)) return;
+      team.players.forEach(pid => {
+        if (!stats[pid]) stats[pid] = { playerId: pid, played: 0, wins: 0, losses: 0, pointsFor: 0, pointsAgainst: 0, potm: 0 };
+        const s = stats[pid];
+        s.played++;
+        if (m.winner === team.id) s.wins++; else s.losses++;
+        (m.games || []).forEach(g => {
+          s.pointsFor += idx === 0 ? (g.a || 0) : (g.b || 0);
+          s.pointsAgainst += idx === 0 ? (g.b || 0) : (g.a || 0);
+        });
+      });
+    });
     if (m.playerOfMatch && stats[m.playerOfMatch]) stats[m.playerOfMatch].potm++;
   });
-  return Object.values(stats).map(s => ({ ...s, winRate: s.played ? Math.round(s.wins / s.played * 100) : 0, pointDiff: s.pointsFor - s.pointsAgainst })).sort((a, b) => b.wins - a.wins || b.pointDiff - a.pointDiff || b.potm - a.potm);
+  return Object.values(stats).map(s => ({
+    ...s,
+    winRate: s.played ? Math.round(s.wins / s.played * 100) : 0,
+    pointDiff: s.pointsFor - s.pointsAgainst
+  })).sort((a, b) => b.wins - a.wins || b.pointDiff - a.pointDiff || b.potm - a.potm);
 }
 
 function playerModal(existing = null) {
@@ -388,7 +432,10 @@ function fileToData(file) {
 
 function renderTournament() {
   const root = $('#view-tournament');
+  if (!root) return;
   const t = activeT();
+  const players = Array.isArray(db.players) && db.players.length ? db.players : defaultInitialPlayers;
+  const tMatches = t && Array.isArray(t.matches) ? t.matches : [];
   root.innerHTML = `
     <div class="section-head" style="margin-top:0">
       <div><h3>Create a tournament</h3><p>Choose the players and format. Teams and fixtures are generated for you.</p></div>
@@ -396,11 +443,11 @@ function renderTournament() {
     </div>
     <form id="tournamentForm" class="panel">
       <div class="form-grid">
-        <div class="field"><label>TOURNAMENT NAME *</label><input name="name" required placeholder="e.g. BPL Smash Cup"></div>
+        <div class="field"><label>TOURNAMENT NAME *</label><input name="name" required placeholder="e.g. BPL Smash Cup" value="BPL Tournament"></div>
         <div class="field"><label>DATE</label><input name="date" type="date" value="${new Date().toISOString().slice(0, 10)}"></div>
-        <div class="field full-span"><label>VENUE</label><input name="venue" placeholder="Court / sports centre"></div>
+        <div class="field full-span"><label>VENUE</label><input name="venue" placeholder="Court / sports centre" value="Badminton Court"></div>
         <div class="field full-span"><label>SELECT PARTICIPATING PLAYERS <span class="muted">(minimum 4 for doubles)</span></label>
-          ${db.players.length ? `<div class="check-list">${db.players.map(p => `<label class="check-player">${avatar(p, 'player-avatar')}<input type="checkbox" name="playerIds" value="${p.id}" checked> ${esc(p.name)}</label>`).join('')}</div>` : '<p class="muted">Add players in the Players section first.</p>'}
+          ${players.length ? `<div class="check-list">${players.map(p => `<label class="check-player">${avatar(p, 'player-avatar')}<input type="checkbox" name="playerIds" value="${p.id}" checked> ${esc(p.name)}</label>`).join('')}</div>` : '<p class="muted">Add players in the Players section first.</p>'}
         </div>
         <div class="field full-span"><label>TEAM PAIRING MODE</label>
           <div class="option-row">
@@ -421,13 +468,14 @@ function renderTournament() {
             <div class="option"><label><input type="radio" name="format" value="league"> League</label><small>Standings decide the winner.</small></div>
           </div>
         </div>
-        <div class="field" id="roundsField"><label>ROTATING MODE – NUMBER OF ROUNDS</label><input name="rounds" type="number" min="1" max="8" value="${Math.max(1, Math.floor(db.players.length / 2))}"></div>
+        <div class="field hidden" id="roundsField"><label>ROTATING MODE – NUMBER OF ROUNDS</label><input name="rounds" type="number" min="1" max="8" value="${Math.max(1, Math.floor(players.length / 2))}"></div>
       </div>
-      <div class="modal-actions"><button class="btn primary" type="submit" ${db.players.length < 4 ? 'disabled' : ''}>Generate teams & fixtures →</button></div>
+      <div class="modal-actions"><button class="btn primary" id="generateTournamentBtn" type="submit" ${players.length < 4 ? 'disabled' : ''}>Generate teams & fixtures →</button></div>
     </form>
-    ${t ? `<div class="section-head"><div><h3>Current tournament</h3><p>${esc(t.name)} · ${t.matches.length} fixtures generated</p></div><button class="btn ghost small" data-goto="matches">Go to scoring →</button></div>` : ''}
+    ${t ? `<div class="section-head"><div><h3>Current tournament</h3><p>${esc(t.name)} · ${tMatches.length} fixtures generated</p></div><button class="btn ghost small" data-goto="matches">Go to scoring →</button></div>` : ''}
   `;
   const form = $('#tournamentForm');
+  if (!form) return;
   form.querySelectorAll('[name=pairingMode]').forEach(x => x.addEventListener('change', () => {
     const rotating = form.pairingMode.value === 'rotating';
     $('#teamSelectionField').classList.toggle('hidden', rotating);
@@ -436,13 +484,19 @@ function renderTournament() {
   form.onsubmit = async e => {
     e.preventDefault();
     const fd = new FormData(form), ids = fd.getAll('playerIds');
-    if (ids.length < 4) return notify('Select at least 4 players.', true);
-    if (!confirm(`Generate tournament with ${ids.length} players? This will make it the active tournament.`)) return;
+    if (ids.length < 4) return notify('Select at least 4 players for doubles.', true);
+    
+    const submitBtn = $('#generateTournamentBtn');
+    if (submitBtn) {
+      submitBtn.disabled = true;
+      submitBtn.textContent = 'Generating fixtures...';
+    }
+
     try {
       await api('/api/tournaments', {
         method: 'POST',
         body: JSON.stringify({
-          name: fd.get('name'),
+          name: fd.get('name') || 'Badminton Tournament',
           date: fd.get('date'),
           venue: fd.get('venue'),
           playerIds: ids,
@@ -452,33 +506,44 @@ function renderTournament() {
           rounds: fd.get('rounds')
         })
       });
+      await refresh();
       notify('Tournament and fixtures generated!');
       setView('matches');
     } catch (err) {
-      notify(err.message, true);
+      notify(err.message || 'Failed to generate tournament', true);
+      if (submitBtn) {
+        submitBtn.disabled = false;
+        submitBtn.textContent = 'Generate teams & fixtures →';
+      }
     }
   };
 }
 
 function renderMatches() {
   const t = activeT(), root = $('#view-matches');
+  if (!root) return;
   if (!t) {
-    root.innerHTML = '<div class="panel empty"><div class="empty-icon">▤</div><b>No active tournament</b><p>Create a tournament to generate match fixtures.</p><button class="btn primary" data-goto="tournament">Create tournament</button></div>';
+    root.innerHTML = '<div class="panel empty"><div class="empty-icon">▤</div><b>No active tournament</b><p>Create a tournament to generate match fixtures.</p><button class="btn primary" data-goto="tournament">＋ Create tournament</button></div>';
     return;
   }
-  const rounds = [...new Set(t.matches.map(m => m.round))];
+  const matches = Array.isArray(t.matches) ? t.matches : [];
+  const rounds = [...new Set(matches.map(m => m.round))];
+  const playerIds = Array.isArray(t.playerIds) ? t.playerIds : [];
   root.innerHTML = `
     <div class="section-head" style="margin-top:0">
-      <div><h3>${esc(t.name)}</h3><p>${t.playerIds.length} players · ${t.matches.length} matches · ${t.pairingMode === 'fixed' ? 'Fixed teams' : 'Rotating partners'}</p></div>
-      <a class="btn ghost" href="${getServerBase() ? getServerBase() + '/?view=public' : '/?view=public'}" target="_blank">↗ Open public scoreboard</a>
+      <div><h3>${esc(t.name)}</h3><p>${playerIds.length} players · ${matches.length} matches · ${t.pairingMode === 'fixed' ? 'Fixed teams' : 'Rotating partners'}</p></div>
+      <div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap">
+        <button class="btn ghost small" data-goto="tournament">＋ New Tournament</button>
+        <a class="btn ghost small" href="${getServerBase() ? getServerBase() + '/?view=public' : '/?view=public'}" target="_blank">↗ Live screen</a>
+      </div>
     </div>
     <div class="grid stats-grid" style="margin-bottom:20px">
-      <div class="stat-card"><small>Total fixtures</small><strong>${t.matches.length}</strong></div>
-      <div class="stat-card"><small>Completed</small><strong>${t.matches.filter(m => m.status === 'completed').length}</strong></div>
-      <div class="stat-card"><small>Live now</small><strong>${t.matches.filter(m => m.status === 'live').length}</strong></div>
-      <div class="stat-card"><small>Remaining</small><strong>${t.matches.filter(m => m.status !== 'completed').length}</strong></div>
+      <div class="stat-card"><small>Total fixtures</small><strong>${matches.length}</strong></div>
+      <div class="stat-card"><small>Completed</small><strong>${matches.filter(m => m.status === 'completed').length}</strong></div>
+      <div class="stat-card"><small>Live now</small><strong>${matches.filter(m => m.status === 'live').length}</strong></div>
+      <div class="stat-card"><small>Remaining</small><strong>${matches.filter(m => m.status !== 'completed').length}</strong></div>
     </div>
-    ${rounds.map(r => `<div class="round-title">ROUND ${r}</div><div class="match-list">${t.matches.filter(m => m.round === r).map(matchCard).join('')}</div>`).join('') || '<div class="panel empty">No fixtures generated.</div>'}
+    ${rounds.map(r => `<div class="round-title">ROUND ${r}</div><div class="match-list">${matches.filter(m => m.round === r).map(matchCard).join('')}</div>`).join('') || '<div class="panel empty">No fixtures generated.</div>'}
     <div class="section-head"><div><h3>Scoring controls</h3><p>Tap +1 to award a point. Changes save automatically and sync to spectator screens.</p></div></div>
     <div class="panel"><span class="pill green">● Live sync enabled</span> <span class="muted" style="font-size:11px;margin-left:8px">Best of 3 · 21 points · win by 2 · cap at 30</span></div>
   `;
@@ -716,7 +781,14 @@ function publicView() {
 
 async function refresh() {
   try {
-    db = await api('/api/state');
+    const data = await api('/api/state');
+    if (data && typeof data === 'object') {
+      db = {
+        players: (Array.isArray(data.players) && data.players.length) ? data.players : (db.players || defaultInitialPlayers),
+        tournaments: Array.isArray(data.tournaments) ? data.tournaments : [],
+        activeTournamentId: data.activeTournamentId || null
+      };
+    }
     render();
     if ($('#publicScreen') && !$('#publicScreen').classList.contains('hidden')) publicView();
   } catch (e) {
@@ -779,16 +851,15 @@ function showApp() {
   $('#app').classList.remove('hidden');
   $('#roleName').textContent = session.role === 'admin' ? 'Organizer' : 'Authorized scorer';
   $('#userAvatar').textContent = session.role === 'admin' ? 'O' : 'S';
-  $$('.nav-item').forEach(b => b.addEventListener('click', () => setView(b.dataset.view)));
-  $$('.bottom-nav-item[data-view]').forEach(b => b.addEventListener('click', () => setView(b.dataset.view)));
+  $$('.nav-item').forEach(b => b.onclick = () => setView(b.dataset.view));
+  $$('.bottom-nav-item[data-view]').forEach(b => b.onclick = () => setView(b.dataset.view));
   if (!canAdmin()) {
     $$('.nav-item').filter(b => ['players', 'tournament', 'history', 'awards'].includes(b.dataset.view)).forEach(b => b.classList.add('hidden'));
     $$('.bottom-nav-item').filter(b => ['players'].includes(b.dataset.view)).forEach(b => b.classList.add('hidden'));
   }
   updateServerLabel();
   connectWS();
-  refresh();
-  setView('dashboard');
+  refresh().then(() => setView('dashboard'));
 }
 
 $('#logoutBtn').onclick = () => {
@@ -854,8 +925,18 @@ document.addEventListener('click', async e => {
     const saved = JSON.parse(localStorage.getItem('rallySession') || 'null');
     if (saved) {
       session = saved;
-      const check = await api('/api/state');
-      db = check;
+      try {
+        const check = await api('/api/state');
+        if (check && typeof check === 'object') {
+          db = {
+            players: (Array.isArray(check.players) && check.players.length) ? check.players : defaultInitialPlayers,
+            tournaments: Array.isArray(check.tournaments) ? check.tournaments : [],
+            activeTournamentId: check.activeTournamentId || null
+          };
+        }
+      } catch (err) {
+        console.warn('Initial state fetch offline:', err);
+      }
       showApp();
     }
   } catch {
