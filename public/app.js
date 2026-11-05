@@ -163,6 +163,7 @@ function setView(view) {
   currentView = view;
   toggleMobileSidebar(false);
   $$('.nav-item').forEach(b => b.classList.toggle('active', b.dataset.view === view));
+  $$('.bottom-nav-item').forEach(b => b.classList.toggle('active', b.dataset.view === view));
   $$('.view').forEach(v => v.classList.toggle('active', v.id === `view-${view}`));
   const titles = {
     dashboard: ['OVERVIEW', 'Tournament overview'],
@@ -193,24 +194,86 @@ function render() {
 
 function matchCard(m) {
   const g = matchScore(m), status = m.status === 'completed' ? 'Completed' : m.status === 'live' ? 'Live' : 'Upcoming';
-  return `<article class="match-card">
-    <div class="match-top"><small>${esc(m.code)} · ROUND ${m.round}</small><span class="pill ${m.status === 'live' ? 'green' : m.status === 'completed' ? 'blue' : ''}">${status}</span></div>
-    <div class="match-teams">
-      <div class="team-side"><b>${esc(teamName(m.teamA))}</b><small>TEAM A</small></div>
-      <span class="versus">VS</span>
-      <div class="team-side"><b>${esc(teamName(m.teamB))}</b><small>TEAM B</small></div>
-    </div>
-    <div class="score-row"><span class="score-number">${g.a}</span><span class="score-sep">:</span><span class="score-number">${g.b}</span></div>
-    ${m.status !== 'completed' ? `<div class="score-controls">
-      <button class="score-btn" data-score="${m.id}" data-side="a" data-delta="-1" ${!session ? 'disabled' : ''}>−</button>
-      <button class="score-btn plus" data-score="${m.id}" data-side="a" data-delta="1" ${!session ? 'disabled' : ''}>+ A</button>
-      <button class="score-btn plus" data-score="${m.id}" data-side="b" data-delta="1" ${!session ? 'disabled' : ''}>+ B</button>
-      <button class="score-btn" data-score="${m.id}" data-side="b" data-delta="-1" ${!session ? 'disabled' : ''}>−</button>
-    </div>` : `<div class="match-foot"><span>Winner: <b>${esc(teamName(m.winner === m.teamA.id ? m.teamA : m.teamB))}</b></span><span>${m.games.filter(g => g.completed).length} games</span></div>`}
-    <div class="match-foot"><span>Game ${(m.currentGame || 0) + 1} · Best of 3</span><span>${m.playerOfMatch ? `POTM: ${esc(player(m.playerOfMatch).name)}` : 'POTM pending'}</span></div>
-    ${canAdmin() && m.status === 'completed' ? `<div class="match-actions"><button class="btn ghost small" data-potm="${m.id}">✦ Set / edit POTM</button><button class="btn ghost small" data-reopen="${m.id}">Reopen</button></div>` : ''}
-    <div class="match-foot"><button data-undo="${m.id}" ${m.status === 'completed' ? 'disabled' : ''}>↶ Undo last point</button><span>${m.status === 'live' ? 'Score auto-saved' : ''}</span></div>
-  </article>`;
+  const aLead = g.a > g.b;
+  const bLead = g.b > g.a;
+  return `
+    <article class="match-card">
+      <div class="match-top">
+        <div class="match-tag-group">
+          <span class="match-code-badge">${esc(m.code)}</span>
+          <span class="round-badge">ROUND ${m.round}</span>
+        </div>
+        <span class="pill ${m.status === 'live' ? 'green pulse' : m.status === 'completed' ? 'blue' : ''}">${status}</span>
+      </div>
+
+      <div class="match-teams-layout">
+        <div class="team-block ${m.winner === m.teamA.id ? 'winner-block' : ''}">
+          <span class="team-sub">TEAM A</span>
+          <b class="team-title">${esc(teamName(m.teamA))}</b>
+          <div class="team-big-score ${aLead ? 'score-highlight' : ''}">${g.a}</div>
+          ${m.status !== 'completed' ? `
+            <div class="score-tap-group">
+              <button class="tap-btn plus-tap" data-score="${m.id}" data-side="a" data-delta="1" ${!session ? 'disabled' : ''}>
+                +1 A
+              </button>
+              <button class="tap-btn minus-tap" data-score="${m.id}" data-side="a" data-delta="-1" ${!session ? 'disabled' : ''}>
+                −
+              </button>
+            </div>
+          ` : ''}
+        </div>
+
+        <div class="vs-center-column">
+          <span class="vs-badge">VS</span>
+          <span class="set-counter">Game ${(m.currentGame || 0) + 1}</span>
+          <span class="race-to">to 21</span>
+        </div>
+
+        <div class="team-block ${m.winner === m.teamB.id ? 'winner-block' : ''}">
+          <span class="team-sub">TEAM B</span>
+          <b class="team-title">${esc(teamName(m.teamB))}</b>
+          <div class="team-big-score ${bLead ? 'score-highlight' : ''}">${g.b}</div>
+          ${m.status !== 'completed' ? `
+            <div class="score-tap-group">
+              <button class="tap-btn plus-tap" data-score="${m.id}" data-side="b" data-delta="1" ${!session ? 'disabled' : ''}>
+                +1 B
+              </button>
+              <button class="tap-btn minus-tap" data-score="${m.id}" data-side="b" data-delta="-1" ${!session ? 'disabled' : ''}>
+                −
+              </button>
+            </div>
+          ` : ''}
+        </div>
+      </div>
+
+      <div class="match-meta-bar">
+        <div class="sets-history">
+          ${m.games.map((set, i) => `
+            <span class="set-chip ${set.completed ? 'finished' : i === m.currentGame ? 'ongoing' : ''}">
+              G${i+1}: <b>${set.a}–${set.b}</b>
+            </span>
+          `).join('')}
+        </div>
+        ${m.status !== 'completed' ? `
+          <button class="undo-action-btn" data-undo="${m.id}">↶ Undo last</button>
+        ` : `
+          <span class="match-winner-note">🏆 Winner: <b>${esc(teamName(m.winner === m.teamA.id ? m.teamA : m.teamB))}</b></span>
+        `}
+      </div>
+
+      ${m.playerOfMatch || (canAdmin() && m.status === 'completed') ? `
+        <div class="match-admin-footer">
+          <span>${m.playerOfMatch ? `⭐ POTM: <b>${esc(player(m.playerOfMatch).name)}</b>` : 'POTM pending approval'}</span>
+          ${canAdmin() && m.status === 'completed' ? `
+            <div class="card-btn-row">
+              <button class="btn ghost small" data-potm="${m.id}">✦ ${m.playerOfMatch ? 'Edit POTM' : 'Set POTM'}</button>
+              <button class="btn ghost small" data-reopen="${m.id}">Reopen</button>
+            </div>
+          ` : ''}
+        </div>
+      ` : ''}
+    </article>
+  `;
 }
 
 function renderDashboard() {
@@ -430,21 +493,43 @@ function renderLeaderboard() {
   const stats = calcStats(t);
   root.innerHTML = `
     <div class="section-head" style="margin-top:0">
-      <div><h3>Player leaderboard</h3><p>Individual performance across completed matches.</p></div>
-      <span class="pill blue">${t.name}</span>
+      <div><h3>Player Leaderboard</h3><p>Individual performance across completed matches.</p></div>
+      <span class="pill blue">${esc(t.name)}</span>
     </div>
-    <div class="panel">
-      <div class="leader-row header"><span>#</span><span>PLAYER</span><span>PLAYED</span><span>WINS</span><span>WIN %</span><span>DIFF</span></div>
-      ${stats.map((s, i) => `
-        <div class="leader-row">
-          <span class="rank">${String(i + 1).padStart(2, '0')}</span>
-          <span class="leader-name">${avatar(player(s.playerId))}${esc(player(s.playerId).name)}</span>
-          <span class="leader-val">${s.played}</span>
-          <span class="leader-val">${s.wins}</span>
-          <span class="leader-val">${s.winRate}%</span>
-          <span class="leader-val">${s.pointDiff > 0 ? '+' : ''}${s.pointDiff}</span>
-        </div>
-      `).join('')}
+    <div class="panel leaderboard-panel">
+      <div class="leader-table-head">
+        <span class="col-rank">#</span>
+        <span class="col-player">PLAYER</span>
+        <span class="col-val">P</span>
+        <span class="col-val">W</span>
+        <span class="col-val">WIN%</span>
+        <span class="col-val">DIFF</span>
+      </div>
+      <div class="leader-table-body">
+        ${stats.map((s, i) => {
+          const rankClass = i === 0 ? 'gold-rank' : i === 1 ? 'silver-rank' : i === 2 ? 'bronze-rank' : '';
+          const diffSign = s.pointDiff > 0 ? '+' : '';
+          const diffClass = s.pointDiff > 0 ? 'diff-pos' : s.pointDiff < 0 ? 'diff-neg' : '';
+          return `
+            <div class="leader-table-row ${rankClass}">
+              <div class="col-rank">
+                <span class="rank-badge">${i === 0 ? '🥇' : i === 1 ? '🥈' : i === 2 ? '🥉' : String(i + 1).padStart(2, '0')}</span>
+              </div>
+              <div class="col-player">
+                ${avatar(player(s.playerId))}
+                <div class="player-info-cell">
+                  <span class="name-main">${esc(player(s.playerId).name)}</span>
+                  <small class="name-nick">${esc(player(s.playerId).nickname || 'Player')}</small>
+                </div>
+              </div>
+              <div class="col-val">${s.played}</div>
+              <div class="col-val bold-val">${s.wins}</div>
+              <div class="col-val"><span class="rate-badge">${s.winRate}%</span></div>
+              <div class="col-val ${diffClass}">${diffSign}${s.pointDiff}</div>
+            </div>
+          `;
+        }).join('')}
+      </div>
     </div>
   `;
 }
@@ -695,8 +780,10 @@ function showApp() {
   $('#roleName').textContent = session.role === 'admin' ? 'Organizer' : 'Authorized scorer';
   $('#userAvatar').textContent = session.role === 'admin' ? 'O' : 'S';
   $$('.nav-item').forEach(b => b.addEventListener('click', () => setView(b.dataset.view)));
+  $$('.bottom-nav-item[data-view]').forEach(b => b.addEventListener('click', () => setView(b.dataset.view)));
   if (!canAdmin()) {
     $$('.nav-item').filter(b => ['players', 'tournament', 'history', 'awards'].includes(b.dataset.view)).forEach(b => b.classList.add('hidden'));
+    $$('.bottom-nav-item').filter(b => ['players'].includes(b.dataset.view)).forEach(b => b.classList.add('hidden'));
   }
   updateServerLabel();
   connectWS();
@@ -715,6 +802,7 @@ $('#sidebarServerBtn')?.addEventListener('click', serverConfigModal);
 $('#mobileMenuBtn')?.addEventListener('click', () => toggleMobileSidebar(true));
 $('#sidebarCloseBtn')?.addEventListener('click', () => toggleMobileSidebar(false));
 $('#sidebarOverlay')?.addEventListener('click', () => toggleMobileSidebar(false));
+$('#bottomNavMoreBtn')?.addEventListener('click', () => toggleMobileSidebar(true));
 
 document.addEventListener('click', async e => {
   const goto = e.target.closest('[data-goto]');

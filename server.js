@@ -14,10 +14,30 @@ const DATA_DIR = path.join(__dirname, 'data');
 const DATA_FILE = path.join(DATA_DIR, 'tournament.json');
 fs.mkdirSync(DATA_DIR, { recursive: true });
 
-const emptyState = () => ({ players: [], tournaments: [], activeTournamentId: null });
+const defaultPlayers = [
+  { id: 'player_1', name: 'Arun', nickname: 'Smash Specialist', photo: '', createdAt: new Date().toISOString() },
+  { id: 'player_2', name: 'Mani', nickname: 'Net Play Pro', photo: '', createdAt: new Date().toISOString() },
+  { id: 'player_3', name: 'Shabaree', nickname: 'Ace', photo: '', createdAt: new Date().toISOString() },
+  { id: 'player_4', name: 'Lokesh', nickname: 'Power Play', photo: '', createdAt: new Date().toISOString() },
+  { id: 'player_5', name: 'Nowful', nickname: 'Spin Master', photo: '', createdAt: new Date().toISOString() },
+  { id: 'player_6', name: 'Abishek', nickname: 'Rocket', photo: '', createdAt: new Date().toISOString() },
+  { id: 'player_7', name: 'Pawan', nickname: 'Drop Shot', photo: '', createdAt: new Date().toISOString() },
+  { id: 'player_8', name: 'Karthi', nickname: 'Defense Wall', photo: '', createdAt: new Date().toISOString() }
+];
+
+const emptyState = () => ({ players: defaultPlayers, tournaments: [], activeTournamentId: null });
 let state;
-try { state = JSON.parse(fs.readFileSync(DATA_FILE, 'utf8')); }
-catch { state = emptyState(); }
+try {
+  state = JSON.parse(fs.readFileSync(DATA_FILE, 'utf8'));
+  if (!state.players || state.players.length === 0) {
+    state.players = defaultPlayers;
+    persist();
+  }
+}
+catch {
+  state = emptyState();
+  persist();
+}
 function persist() { fs.writeFileSync(DATA_FILE, JSON.stringify(state, null, 2)); }
 function publicState() { return state; }
 function broadcast() {
